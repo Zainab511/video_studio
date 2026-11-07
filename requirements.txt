@@ -1,0 +1,7 @@
+flask
+groq
+moviepy
+pillow
+python-dotenv
+# optional, for free local voiceover:
+# piper-tts

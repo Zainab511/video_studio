@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Studio</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16181d; --muted: #667085;
+    --line: #e4e7ec; --accent: #2563eb; --accent-text: #ffffff; --danger: #d92d20;
+    --ok: #12805c; --field: #ffffff;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #181b22; --text: #eceef2; --muted: #98a2b3;
+      --line: #2a2f3a; --accent: #4f8cff; --accent-text: #0b1020; --danger: #f97066;
+      --ok: #3ccb97; --field: #12151b;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header { padding: 20px 28px 0; }
+  header h1 { margin: 0; font-size: 22px; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
+  main {
+    display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+    gap: 20px; padding: 20px 28px 40px; max-width: 1280px; margin: 0 auto;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } header { padding: 16px 16px 0; } }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px;
+  }
+  .card + .card { margin-top: 20px; }
+  h2 { margin: 0 0 12px; font-size: 16px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  input[type=text], input[type=number], select, textarea {
+    width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--field); color: var(--text); font: inherit;
+  }
+  textarea { min-height: 300px; resize: vertical; font: 13.5px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  input:focus, textarea:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row { display: flex; gap: 10px; align-items: flex-end; }
+  .row > .grow { flex: 1; }
+  button {
+    font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 9px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--card); color: var(--text);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  a.btn {
+    display: inline-block; text-decoration: none; font-weight: 600; padding: 9px 16px;
+    border-radius: 9px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-text);
+  }
+  .hint { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+  .hint code { background: var(--bg); padding: 1px 5px; border-radius: 5px; }
+  .check { display: flex; align-items: center; gap: 8px; margin: 14px 0 0; color: var(--text); font-size: 14px; }
+  .check input { width: auto; }
+  .progress { height: 9px; border-radius: 6px; background: var(--line); overflow: hidden; margin-top: 14px; display: none; }
+  .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+  .status { font-size: 13.5px; margin-top: 8px; min-height: 20px; color: var(--muted); }
+  .status.error { color: var(--danger); }
+  .status.ok { color: var(--ok); }
+  .player-wrap { display: none; }
+  video { width: 100%; border-radius: 10px; background: #000; aspect-ratio: 16 / 9; }
+  .empty { color: var(--muted); text-align: center; padding: 50px 10px; border: 1px dashed var(--line); border-radius: 10px; }
+  .vtitle { margin: 12px 0 2px; font-weight: 600; font-size: 16px; }
+  .vmeta { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  ul.lib { list-style: none; margin: 0; padding: 0; }
+  ul.lib li {
+    display: flex; align-items: center; gap: 10px; padding: 10px; border-radius: 9px;
+    border: 1px solid transparent; cursor: pointer;
+  }
+  ul.lib li:hover { background: var(--bg); }
+  ul.lib li.active { border-color: var(--accent); background: var(--bg); }
+  ul.lib .info { flex: 1; min-width: 0; }
+  ul.lib .t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  ul.lib .m { color: var(--muted); font-size: 12.5px; }
+  ul.lib button { padding: 4px 10px; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Video Studio</h1>
+  <p>Write or generate a script, build the video on your machine, then watch or download it.</p>
+</header>
+
+<main>
+  <section>
+    <div class="card">
+      <h2>1. Script</h2>
+
+      <label for="topic">Generate a script with Groq from a topic (optional)</label>
+      <div class="row">
+        <div class="grow"><input id="topic" type="text" placeholder="e.g. How does DNS work?"></div>
+        <div style="width:92px">
+          <select id="scenes" title="Number of scenes">
+            <option>3</option><option selected>5</option><option>7</option><option>10</option>
+          </select>
+        </div>
+        <button id="genBtn">Generate</button>
+      </div>
+      <div class="hint" id="genHint"></div>
+
+      <label for="script">Script (edit freely)</label>
+      <textarea id="script" spellcheck="true" placeholder="# Scene title&#10;- bullet one&#10;- bullet two&#10;Narration for this scene, written the way you would say it out loud.&#10;&#10;# Next scene&#10;- another bullet&#10;More narration..."></textarea>
+      <div class="hint">
+        Each scene starts with <code># Title</code>, then optional <code>- bullets</code>, then narration text.
+        No headings? Separate paragraphs with a blank line and titles and bullets are made for you.
+        <a href="#" id="example">Load an example</a>
+      </div>
+
+      <label for="title">Video title</label>
+      <input id="title" type="text" placeholder="Used for the library and download name">
+
+      <label class="check"><input type="checkbox" id="voice"> <span id="voiceLabel">Add voiceover</span></label>
+
+      <div style="margin-top:16px"><button id="buildBtn" class="primary">Build video</button></div>
+      <div class="progress" id="progress"><div id="bar"></div></div>
+      <div class="status" id="status"></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h2>2. Preview</h2>
+      <div class="empty" id="empty">Your video will appear here after it is built.</div>
+      <div class="player-wrap" id="player">
+        <video id="video" controls playsinline></video>
+        <div class="vtitle" id="vtitle"></div>
+        <div class="vmeta" id="vmeta"></div>
+        <div class="actions">
+          <a class="btn" id="download" href="#">Download MP4</a>
+          <button id="loadScript">Edit this script</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Library</h2>
+      <div class="empty" id="libEmpty" style="padding:24px 10px">No saved videos yet.</div>
+      <ul class="lib" id="lib"></ul>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const EXAMPLE = `# Why use Git?
+- Tracks every change
+- Lets teams work together safely
+Git keeps a full history of your code. If something breaks, you can go back to a version that worked.
+
+# Branches
+- Work on features in isolation
+- Merge when ready
+A branch is a separate line of work. You can experiment freely without touching the main code.`;
+
+let current = null;   // metadata of the video in the player
+let busy = false;
+
+function fmtDuration(sec) {
+  const m = Math.floor(sec / 60), s = Math.round(sec % 60);
+  return m + ":" + String(s).padStart(2, "0");
+}
+function fmtDate(ts) { return new Date(ts * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }); }
+function setStatus(text, kind) { const el = $("status"); el.textContent = text || ""; el.className = "status" + (kind ? " " + kind : ""); }
+
+async function api(url, options) {
+  const res = await fetch(url, options);
+  let data = {};
+  try { data = await res.json(); } catch (e) { /* non-JSON response */ }
+  if (!res.ok) throw new Error(data.error || ("Request failed (" + res.status + ")"));
+  return data;
+}
+
+async function loadConfig() {
+  try {
+    const cfg = await api("/api/config");
+    if (!cfg.groq) {
+      $("genBtn").disabled = true; $("topic").disabled = true;
+      $("genHint").textContent = "Script generation is off: add GROQ_API_KEY to your .env file and restart. You can still paste your own script.";
+    } else {
+      $("genHint").textContent = "Using model " + cfg.model + ".";
+    }
+    if (!cfg.voice) {
+      $("voice").disabled = true;
+      $("voiceLabel").textContent = "Add voiceover (needs Piper: set PIPER_VOICE in .env)";
+    } else {
+      $("voice").checked = true;
+    }
+  } catch (e) { setStatus(e.message, "error"); }
+}
+
+$("genBtn").addEventListener("click", async () => {
+  const topic = $("topic").value.trim();
+  if (!topic) { setStatus("Enter a topic first.", "error"); return; }
+  $("genBtn").disabled = true; setStatus("Asking Groq for a script...");
+  try {
+    const data = await api("/api/generate-script", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic, scenes: Number($("scenes").value) }),
+    });
+    $("script").value = data.script;
+    if (!$("title").value) $("title").value = data.title;
+    setStatus("Script ready. Edit it if you like, then build the video.", "ok");
+  } catch (e) { setStatus(e.message, "error"); }
+  $("genBtn").disabled = false;
+});
+
+$("example").addEventListener("click", (ev) => { ev.preventDefault(); $("script").value = EXAMPLE; if (!$("title").value) $("title").value = "Git basics"; });
+
+$("buildBtn").addEventListener("click", async () => {
+  if (busy) return;
+  const script = $("script").value.trim();
+  if (!script) { setStatus("Write or generate a script first.", "error"); return; }
+  busy = true; $("buildBtn").disabled = true;
+  $("progress").style.display = "block"; $("bar").style.width = "2%";
+  setStatus("Starting...");
+  try {
+    const { job } = await api("/api/build", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ script, title: $("title").value.trim(), voice: $("voice").checked }),
+    });
+    await pollJob(job);
+  } catch (e) {
+    setStatus(e.message, "error"); $("progress").style.display = "none";
+  }
+  busy = false; $("buildBtn").disabled = false;
+});
+
+async function pollJob(job) {
+  while (true) {
+    const j = await api("/api/jobs/" + job);
+    $("bar").style.width = Math.max(2, Math.round(j.progress * 100)) + "%";
+    if (j.status === "error") throw new Error(j.error || "Build failed.");
+    if (j.status === "done") {
+      setStatus("Video ready.", "ok");
+      setTimeout(() => { $("progress").style.display = "none"; }, 800);
+      await refreshLibrary(); play(j.meta);
+      return;
+    }
+    setStatus(j.message || "Working...");
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+function play(meta) {
+  current = meta;
+  $("empty").style.display = "none"; $("player").style.display = "block";
+  const v = $("video");
+  v.src = "/videos/" + meta.id + ".mp4";
+  v.load();
+  $("vtitle").textContent = meta.title;
+  $("vmeta").textContent = fmtDuration(meta.duration) + " · " + meta.scenes + " scenes · " + (meta.voice ? "with voiceover" : "no voiceover") + " · " + fmtDate(meta.created);
+  $("download").href = "/videos/" + meta.id + ".mp4?download=1";
+  document.querySelectorAll("#lib li").forEach((li) => li.classList.toggle("active", li.dataset.id === meta.id));
+}
+
+$("loadScript").addEventListener("click", async () => {
+  if (!current) return;
+  const full = await api("/api/videos/" + current.id);
+  $("script").value = full.script; $("title").value = full.title;
+  setStatus("Script loaded. Edit it and build a new version.", "ok");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+});
+
+async function refreshLibrary() {
+  const items = await api("/api/videos");
+  const ul = $("lib"); ul.textContent = "";
+  $("libEmpty").style.display = items.length ? "none" : "block";
+  for (const m of items) {
+    const li = document.createElement("li"); li.dataset.id = m.id;
+    if (current && current.id === m.id) li.classList.add("active");
+    const info = document.createElement("div"); info.className = "info";
+    const t = document.createElement("div"); t.className = "t"; t.textContent = m.title;
+    const sub = document.createElement("div"); sub.className = "m";
+    sub.textContent = fmtDuration(m.duration) + " · " + fmtDate(m.created);
+    info.append(t, sub);
+    const del = document.createElement("button"); del.className = "danger"; del.textContent = "Delete";
+    del.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      if (!confirm("Delete this video?")) return;
+      await api("/api/videos/" + m.id, { method: "DELETE" });
+      if (current && current.id === m.id) {
+        current = null; $("video").removeAttribute("src"); $("video").load();
+        $("player").style.display = "none"; $("empty").style.display = "block";
+      }
+      refreshLibrary();
+    });
+    li.append(info, del);
+    li.addEventListener("click", () => play(m));
+    ul.append(li);
+  }
+}
+
+loadConfig();
+refreshLibrary().catch((e) => setStatus(e.message, "error"));
+</script>
+</body>
+</html>
