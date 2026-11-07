@@ -1,0 +1,30 @@
+# Render Blueprint: Dashboard > New > Blueprint, then pick this repo.
+services:
+  - type: web
+    name: video-studio
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # One worker on purpose: build jobs are tracked in memory.
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: GROQ_API_KEY
+        sync: false          # you enter this in the dashboard
+      - key: GROQ_MODEL
+        value: qwen/qwen3.8-27b
+      - key: APP_PASSWORD
+        sync: false          # you enter this in the dashboard
+      # Lighter settings for the free instance (0.1 CPU):
+      - key: VIDEO_HEIGHT
+        value: "720"
+      - key: VIDEO_FPS
+        value: "10"
+      - key: VIDEO_PRESET
+        value: ultrafast
+      - key: MAX_SCENES
+        value: "8"
+      - key: MAX_VIDEOS
+        value: "5"
