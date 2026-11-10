@@ -64,6 +64,17 @@
   .progress { height: 9px; border-radius: 6px; background: var(--line); overflow: hidden; margin-top: 14px; display: none; }
   .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
   .hint.error { color: var(--danger); }
+  .themes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 4px; }
+  @media (max-width: 560px) { .themes { grid-template-columns: repeat(2, 1fr); } }
+  .tile {
+    padding: 0; overflow: hidden; text-align: left; border: 2px solid var(--line); border-radius: 10px;
+    background: var(--field); cursor: pointer; font-weight: 600; font-size: 12.5px; color: var(--text);
+  }
+  .tile.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset; }
+  .tile img, .tile .ph { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; background: var(--bg); }
+  .tile .ph { display: flex; align-items: center; justify-content: center; font-size: 22px;
+    background: linear-gradient(135deg, #38bdf8, #a78bfa 50%, #f472b6); color: #fff; }
+  .tile .nm { padding: 6px 8px; }
   .status { font-size: 13.5px; margin-top: 8px; min-height: 20px; color: var(--muted); }
   .status.error { color: var(--danger); }
   .status.ok { color: var(--ok); }
@@ -136,6 +147,11 @@
         <a href="#" id="example">Load an example</a>
       </div>
 
+      <label>Visual theme</label>
+      <div class="themes" id="themes"></div>
+      <label class="check"><input type="checkbox" id="animated" checked>
+        <span>Animated (moving backgrounds, text entrances, wipe transitions). Untick for faster themed still slides.</span></label>
+
       <label for="title">Video title</label>
       <input id="title" type="text" placeholder="Used for the library and download name">
 
@@ -203,7 +219,7 @@ async function api(url, options) {
 const CUSTOM = "__custom__";
 const PREF_KEY = "vs_prefs", KEYS_KEY = "vs_keys";
 let CONFIG = null;
-let prefs = { provider: null, models: {}, base_url: "", remember: false };
+let prefs = { provider: null, models: {}, base_url: "", remember: false, theme: null, animated: null };
 let keys = {};            // provider id -> API key (kept in memory; saved to this browser only if "Remember" is ticked)
 let refreshTimer = null, refreshSeq = 0;
 
@@ -286,6 +302,29 @@ $("modelCustom").addEventListener("input", () => { prefs.models[currentProvider(
 $("remember").addEventListener("change", () => { prefs.remember = $("remember").checked; savePrefs(); });
 $("refreshModels").addEventListener("click", refreshModels);
 
+function buildThemePicker() {
+  const box = $("themes"); box.textContent = "";
+  const choices = [{ id: "auto", name: "Auto (match topic)", ph: "A" }, { id: "mix", name: "Mix (new look each scene)", ph: "M" }]
+    .concat(CONFIG.themes);
+  const valid = choices.map((c) => c.id);
+  let selected = valid.includes(prefs.theme) ? prefs.theme : CONFIG.default_theme;
+  box.dataset.value = selected;
+  for (const c of choices) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "tile" + (c.id === selected ? " on" : ""); b.dataset.id = c.id;
+    if (c.ph) { const ph = document.createElement("div"); ph.className = "ph"; ph.textContent = c.ph; b.append(ph); }
+    else { const im = document.createElement("img"); im.src = "/themes/" + c.id + ".png"; im.alt = c.name; im.loading = "lazy"; b.append(im); }
+    const nm = document.createElement("div"); nm.className = "nm"; nm.textContent = c.name; b.append(nm);
+    b.addEventListener("click", () => {
+      box.dataset.value = c.id; prefs.theme = c.id; savePrefs();
+      box.querySelectorAll(".tile").forEach((t) => t.classList.toggle("on", t.dataset.id === c.id));
+    });
+    box.append(b);
+  }
+  $("animated").checked = prefs.animated === null ? !!CONFIG.animated_default : !!prefs.animated;
+}
+$("animated").addEventListener("change", () => { prefs.animated = $("animated").checked; savePrefs(); });
+
 async function loadConfig() {
   try {
     CONFIG = await api("/api/config");
@@ -302,6 +341,7 @@ async function loadConfig() {
     $("remember").checked = !!prefs.remember;
     showProviderUI();
     refreshModels();
+    buildThemePicker();
     if (!CONFIG.voice) {
       $("voice").disabled = true;
       $("voiceLabel").textContent = "Add voiceover (needs Piper: set PIPER_VOICE in .env)";
@@ -339,7 +379,7 @@ $("buildBtn").addEventListener("click", async () => {
   try {
     const { job } = await api("/api/build", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ script, title: $("title").value.trim(), voice: $("voice").checked, llm: llmPayload() }),
+      body: JSON.stringify({ script, title: $("title").value.trim(), voice: $("voice").checked, llm: llmPayload(), theme: $("themes").dataset.value, animated: $("animated").checked }),
     });
     await pollJob(job);
   } catch (e) {
@@ -371,7 +411,7 @@ function play(meta) {
   v.src = "/videos/" + meta.id + ".mp4";
   v.load();
   $("vtitle").textContent = meta.title;
-  $("vmeta").textContent = fmtDuration(meta.duration) + " · " + meta.scenes + " scenes · " + (meta.voice ? "with voiceover" : "no voiceover") + " · " + fmtDate(meta.created);
+  $("vmeta").textContent = fmtDuration(meta.duration) + " · " + meta.scenes + " scenes · " + (meta.voice ? "with voiceover" : "no voiceover") + (meta.theme ? " · " + meta.theme + (meta.animated ? " (animated)" : "") : "") + " · " + fmtDate(meta.created);
   $("download").href = "/videos/" + meta.id + ".mp4?download=1";
   document.querySelectorAll("#lib li").forEach((li) => li.classList.toggle("active", li.dataset.id === meta.id));
 }

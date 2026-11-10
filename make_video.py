@@ -34,9 +34,8 @@ import textwrap
 import wave
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
-
 import llm
+import themes
 
 try:
     from dotenv import load_dotenv
@@ -44,18 +43,20 @@ try:
 except ImportError:
     pass  # fine if you export the variables in your shell instead
 
-W, H = 1920, 1080                                    # slides are always drawn at 1080p
 FPS = int(os.getenv("VIDEO_FPS", "15"))               # slides are still images, so low fps is fine; lower = faster
 OUT_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "1080"))   # output height, e.g. 720 or 480 on weak servers
 VIDEO_PRESET = os.getenv("VIDEO_PRESET", "veryfast")  # x264 speed preset: ultrafast (fastest) ... medium (smallest files)
 VIDEO_THREADS = int(os.getenv("VIDEO_THREADS", "2"))
+VIDEO_THEME = os.getenv("VIDEO_THEME", "auto")                    # auto | mix | midnight | neon | sunrise | ...
+VIDEO_ANIMATED = os.getenv("VIDEO_ANIMATED", "1") != "0"          # 0 = themed still slides (fastest)
 
-PALETTES = [
-    ((15, 23, 42), (56, 189, 248)),    # navy / sky
-    ((24, 24, 27), (250, 204, 21)),    # charcoal / yellow
-    ((17, 24, 39), (52, 211, 153)),    # slate / green
-    ((30, 20, 50), (244, 114, 182)),   # purple / pink
-]
+# Voice and audio quality
+PIPER_NOISE_SCALE = os.getenv("PIPER_NOISE_SCALE", "0.5")   # Piper default 0.667. Lower = smoother, less rough/buzzy
+PIPER_NOISE_W = os.getenv("PIPER_NOISE_W", "")              # Piper default 0.8. Lower = steadier rhythm
+PIPER_LENGTH_SCALE = os.getenv("PIPER_LENGTH_SCALE", "")    # 1.0 = normal pace, 1.1 = 10% slower
+AUDIO_CLEANUP = os.getenv("AUDIO_CLEANUP", "light").lower()  # off | light | strong
+AUDIO_BITRATE = os.getenv("AUDIO_BITRATE", "192k")
+AUDIO_RATE = 48000
 
 DEMO_SCENES = [
     {"title": "What is DNS?",
@@ -191,7 +192,9 @@ def wav_duration(path: Path) -> float:
         return w.getnframes() / float(w.getframerate())
 
 
-def synthesize(text: str, out_wav: Path, voice_model: str | None) -> float | None:
+def synthesize(text: str, out_wav: Path, voice_model: str | None,
+               noise_scale: str | float | None = None, noise_w: str | float | None = None,
+               length_scale: str | float | None = None) -> float | None:
     """Return audio duration in seconds, or None if no TTS is available."""
     if not voice_model:
         return None
@@ -199,67 +202,22 @@ def synthesize(text: str, out_wav: Path, voice_model: str | None) -> float | Non
     if not piper:
         print("  ! 'piper' not found on PATH, skipping voiceover", file=sys.stderr)
         return None
-    subprocess.run(
-        [piper, "--model", voice_model, "--output_file", str(out_wav)],
-        input=text.encode("utf-8"), check=True, capture_output=True,
-    )
+    ns = PIPER_NOISE_SCALE if noise_scale is None else noise_scale
+    nw = PIPER_NOISE_W if noise_w is None else noise_w
+    ls = PIPER_LENGTH_SCALE if length_scale is None else length_scale
+    cmd = [piper, "--model", voice_model, "--output_file", str(out_wav)]
+    for flag, val in (("--noise-scale", ns), ("--noise-w-scale", nw), ("--length-scale", ls)):
+        if str(val).strip():
+            cmd += [flag, str(val)]
+    r = subprocess.run(cmd, input=text.encode("utf-8"), capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError("piper failed: " + r.stderr.decode("utf-8", "replace")[-400:])
     return wav_duration(out_wav)
 
 
 def estimate_duration(text: str) -> float:
     words = len(text.split())
     return max(4.0, words / 2.6)  # ~155 words per minute
-
-
-# ---------- 3. Slide drawing (Pillow) ----------
-
-def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    candidates = [
-        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ]
-    for c in candidates:
-        try:
-            return ImageFont.truetype(c, size)
-        except OSError:
-            continue
-    return ImageFont.load_default(size)
-
-
-def draw_slide(scene: dict, index: int, total: int, out_png: Path) -> None:
-    bg, accent = PALETTES[index % len(PALETTES)]
-    img = Image.new("RGB", (W, H), bg)
-    d = ImageDraw.Draw(img)
-
-    title_font = load_font(96, bold=True)
-    bullet_font = load_font(54)
-    small_font = load_font(32)
-
-    # accent bar + title
-    d.rectangle([100, 120, 116, 250], fill=accent)
-    title = "\n".join(textwrap.wrap(scene.get("title", ""), width=32)[:2])
-    d.multiline_text((150, 110), title, font=title_font, fill="white", spacing=10)
-
-    # bullets
-    y = 400
-    for b in scene.get("bullets", [])[:4]:
-        d.ellipse([150, y + 18, 174, y + 42], fill=accent)
-        wrapped = textwrap.wrap(b, width=46)[:2]
-        d.multiline_text((210, y), "\n".join(wrapped), font=bullet_font, fill=(226, 232, 240), spacing=8)
-        y += 90 * len(wrapped) + 40
-
-    # footer progress
-    d.text((100, H - 80), f"{index + 1} / {total}", font=small_font, fill=(148, 163, 184))
-    bar_w = W - 200
-    d.rectangle([100, H - 30, 100 + bar_w, H - 22], fill=(51, 65, 85))
-    d.rectangle([100, H - 30, 100 + int(bar_w * (index + 1) / total), H - 22], fill=accent)
-
-    if OUT_HEIGHT != H:  # downscale for faster rendering (x264 needs even dimensions)
-        out_w = round(OUT_HEIGHT * W / H) // 2 * 2
-        img = img.resize((out_w, OUT_HEIGHT // 2 * 2), Image.LANCZOS)
-    img.save(out_png)
 
 
 # ---------- 4. Assemble (ffmpeg) ----------
@@ -283,65 +241,120 @@ def run_ffmpeg(args: list[str], cwd: Path | None = None) -> None:
         raise RuntimeError("ffmpeg failed: " + r.stderr[-600:])
 
 
-def build_video(scenes, voice_model, workdir: Path, out_mp4: Path, on_progress=None, quiet=False) -> float:
+def audio_filter(level: str) -> str:
+    """ffmpeg filter chain, applied once to the whole narration track."""
+    level = (level or "light").lower()
+    if level == "off":
+        return ""
+    chain = ["highpass=f=75",      # remove low rumble
+             "lowpass=f=10500"]    # cut the hissy top end (the voice has little above this)
+    if level == "strong":
+        chain.append("afftdn=nr=12:nf=-40")   # spectral noise reduction; can make the voice slightly "watery"
+    chain.append("loudnorm=I=-16:TP=-1.5:LRA=11")  # even loudness, YouTube-friendly level
+    chain.append(f"aresample={AUDIO_RATE}")
+    return ",".join(chain)
+
+
+def build_narration(prepared, workdir: Path) -> Path:
+    """Join all scene voiceovers into ONE continuous, sample-accurate track (no per-scene re-encoding)."""
+    parts = []
+    for i, (_png, wav, dur) in enumerate(prepared):
+        part = workdir / f"narr_{i:02d}.wav"
+        if wav:  # resample, then pad with silence up to the scene length
+            run_ffmpeg(["-i", str(wav), "-af", f"aresample={AUDIO_RATE},apad", "-t", f"{dur:.3f}",
+                        "-ac", "1", "-c:a", "pcm_s16le", str(part)])
+        else:
+            run_ffmpeg(["-f", "lavfi", "-i", f"anullsrc=r={AUDIO_RATE}:cl=mono", "-t", f"{dur:.3f}",
+                        "-c:a", "pcm_s16le", str(part)])
+        parts.append(part)
+    listing = workdir / "narr_list.txt"
+    listing.write_text("".join(f"file '{p.name}'\n" for p in parts), encoding="utf-8")
+    out = workdir / "narration.wav"
+    run_ffmpeg(["-f", "concat", "-safe", "0", "-i", listing.name, "-c", "copy", str(out.resolve())], cwd=workdir)
+    return out
+
+
+def render_scene(i: int, n: int, scene: dict, dur: float, th, animated: bool, workdir: Path) -> Path:
+    """Render one scene to a silent MP4 clip and return its path."""
+    S = OUT_HEIGHT / themes.H
+    seg = workdir / f"seg_{i:02d}.mp4"
+    art = themes.scene_art(scene, i, n, th, dur)
+    is_last = i == n - 1
+    common = ["-t", f"{dur:.3f}", "-r", str(FPS), "-c:v", "libx264", "-preset", VIDEO_PRESET,
+              "-threads", str(VIDEO_THREADS), "-an"]
+    if animated:
+        inputs, graph = themes.animated_graph(art, workdir, f"s{i:02d}", S, FPS, dur, is_last)
+        run_ffmpeg([*inputs, "-filter_complex", graph, "-map", "[vout]", *common, str(seg)])
+    else:
+        png = workdir / f"slide_{i:02d}.png"
+        themes.composite(art, S).save(png)
+        fade = min(0.4, dur / 4)
+        vf = f"fade=t=in:st=0:d={fade:.2f},fade=t=out:st={dur - fade:.3f}:d={fade:.2f},format=yuv420p"
+        run_ffmpeg(["-loop", "1", "-framerate", str(FPS), "-i", str(png), "-vf", vf,
+                    *common, "-tune", "stillimage", str(seg)])
+    return seg
+
+
+def build_video(scenes, voice_model, workdir: Path, out_mp4: Path, on_progress=None, quiet=False,
+                theme: str | None = None, animated: bool | None = None) -> float:
     """
     Render scenes to out_mp4. on_progress(fraction 0-1, message) is optional. Returns duration in seconds.
 
-    Each slide is a still image, so we hand it straight to ffmpeg (one short clip per scene, with
-    fades), then join the clips without re-encoding. This is far faster than building every frame
-    in Python.
+    theme: a theme id, 'auto' (match the topic) or 'mix' (a new theme each scene). animated: False renders
+    themed still slides, which is much faster. Each scene becomes a short clip; clips are joined without
+    re-encoding. Narration is one continuous track, cleaned once and encoded to AAC once.
     """
+    theme = theme or VIDEO_THEME
+    animated = VIDEO_ANIMATED if animated is None else animated
+
     def report(frac: float, msg: str) -> None:
         if on_progress:
             on_progress(frac, msg)
 
     workdir.mkdir(parents=True, exist_ok=True)
+    out_mp4 = Path(out_mp4)
     n = len(scenes)
 
-    # Phase 1: slide images + voiceover audio
-    prepared = []  # (png, wav or None, duration)
+    # Phase 1: voiceover audio + scene lengths
+    prepared = []  # (None, wav or None, duration)
     for i, scene in enumerate(scenes):
         msg = f"Preparing scene {i + 1}/{n}: {scene.get('title')}"
         print(msg)
-        report(0.15 * i / n, msg)
-        png = workdir / f"slide_{i:02d}.png"
+        report(0.1 * i / n, msg)
         wav = workdir / f"voice_{i:02d}.wav"
-        draw_slide(scene, i, n, png)
         narration = scene.get("narration", "")
         audio_len = synthesize(narration, wav, voice_model)
         duration = (audio_len + 0.6) if audio_len else estimate_duration(narration)
-        prepared.append((png, wav if audio_len else None, duration))
+        prepared.append((None, wav if audio_len else None, duration))
 
     has_audio = any(w for _, w, _ in prepared)
 
-    # Phase 2: one clip per scene
+    # Phase 2: one silent, themed video clip per scene
     segments = []
-    for i, (png, wav, dur) in enumerate(prepared):
-        report(0.15 + 0.8 * i / n, f"Rendering scene {i + 1}/{n}...")
-        seg = workdir / f"seg_{i:02d}.mp4"
-        fade = min(0.4, dur / 4)
-        args = ["-loop", "1", "-framerate", str(FPS), "-i", str(png)]
-        if wav:
-            args += ["-i", str(wav)]
-        elif has_audio:  # keep every clip's streams identical so they can be joined
-            args += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
-        vf = f"fade=t=in:st=0:d={fade:.2f},fade=t=out:st={dur - fade:.3f}:d={fade:.2f},format=yuv420p"
-        args += ["-vf", vf, "-t", f"{dur:.3f}", "-r", str(FPS),
-                 "-c:v", "libx264", "-preset", VIDEO_PRESET, "-tune", "stillimage",
-                 "-threads", str(VIDEO_THREADS)]
-        if has_audio:
-            args += ["-af", "apad", "-c:a", "aac", "-ar", "44100", "-ac", "2"]
-        else:
-            args += ["-an"]
-        run_ffmpeg(args + [str(seg)])
-        segments.append(seg)
+    for i, (_none, _wav, dur) in enumerate(prepared):
+        report(0.1 + 0.78 * i / n, f"Rendering scene {i + 1}/{n}...")
+        th = themes.pick_theme(theme, scenes, i)
+        segments.append(render_scene(i, n, scenes[i], dur, th, animated, workdir))
 
     # Phase 3: join the clips (no re-encoding)
-    report(0.95, "Joining scenes...")
+    report(0.88, "Joining scenes...")
     listing = workdir / "list.txt"
     listing.write_text("".join(f"file '{seg.name}'\n" for seg in segments), encoding="utf-8")
+    video_only = (workdir / "video_all.mp4") if has_audio else out_mp4.resolve()
     run_ffmpeg(["-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy",
-                "-movflags", "+faststart", str(Path(out_mp4).resolve())], cwd=workdir)
+                "-movflags", "+faststart", str(video_only.resolve())], cwd=workdir)
+
+    # Phase 4: narration track -> cleaned, encoded once, added to the video
+    if has_audio:
+        report(0.93, "Mixing narration...")
+        narration_wav = build_narration(prepared, workdir)
+        cmd = ["-i", str(video_only), "-i", str(narration_wav), "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy"]
+        af = audio_filter(AUDIO_CLEANUP)
+        if af:
+            cmd += ["-af", af]
+        cmd += ["-c:a", "aac", "-b:a", AUDIO_BITRATE, "-ar", str(AUDIO_RATE), "-ac", "2",
+                "-shortest", "-movflags", "+faststart", str(out_mp4.resolve())]
+        run_ffmpeg(cmd)
 
     report(1.0, "Done")
     print(f"\nDone: {out_mp4}")
@@ -356,6 +369,9 @@ def main() -> None:
                     help="With --script: don't use an AI model for titles/bullets, use a simple offline fallback")
     ap.add_argument("--provider", choices=list(llm.PROVIDERS), help="AI provider (default: LLM_PROVIDER from .env, else groq)")
     ap.add_argument("--model", help="Model id (default: from .env, e.g. GROQ_MODEL)")
+    ap.add_argument("--theme", default=None, choices=["auto", "mix", *themes.THEME_IDS],
+                    help="Visual theme (default: VIDEO_THEME from .env, else auto)")
+    ap.add_argument("--static", action="store_true", help="Themed still slides, no animation (fastest render)")
     ap.add_argument("--scenes", type=int, default=5, help="Number of scenes (default 5)")
     ap.add_argument("--voice", help="Path to a Piper .onnx voice model (optional)")
     ap.add_argument("--out", default="output.mp4", help="Output file name")
@@ -389,7 +405,7 @@ def main() -> None:
     workdir.mkdir(exist_ok=True)
     (workdir / "scenes.json").write_text(json.dumps(scenes, indent=2), encoding="utf-8")  # edit & reuse if you like
 
-    build_video(scenes, args.voice, workdir, Path(args.out))
+    build_video(scenes, args.voice, workdir, Path(args.out), theme=args.theme, animated=not args.static)
 
 
 if __name__ == "__main__":

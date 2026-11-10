@@ -10,6 +10,7 @@ No paid services are needed: Groq has a free tier, and local models via Ollama c
 - Choose the AI provider and model in the UI (Groq, OpenAI, Anthropic, or a custom OpenAI-compatible endpoint), with the model list fetched live from the provider
 - Bring your own API key per provider, or keep keys in `.env`
 - Or paste your own script (structured, plain paragraphs, or JSON)
+- 8 visual themes with animated backgrounds, text entrances, and wipe transitions (or themed still slides for faster renders)
 - Background rendering with a live progress bar
 - Built-in player, MP4 download, and a saved library of past videos
 - Optional free local voiceover with [Piper](https://github.com/OHF-Voice/piper1-gpl)
@@ -56,6 +57,29 @@ Open http://127.0.0.1:5000 and:
 4. Watch it in the preview, or click **Download MP4**
 
 Finished videos are stored in `videos/` and appear in the Library list.
+
+## Themes and animation
+
+Pick a look in the **Visual theme** picker (each tile is a live preview):
+
+| Theme | Style |
+|---|---|
+| Midnight | Deep blue, twinkling stars, drifting glow |
+| Neon Grid | Dark purple, scrolling neon grid, glowing title |
+| Sunrise | Warm gradient, rising sun, frosted bullet cards |
+| Forest | Greens, floating leaves |
+| Blueprint | Technical grid, rotating dial, corner marks |
+| Terminal | Black and green, falling code, typing cursor |
+| Clean Light | White, soft pastel blobs, card bullets |
+| Ocean | Teal gradient, scrolling waves, rising bubbles |
+
+- **Auto** picks a theme from your script's topic (code and Git topics get Terminal, science gets Blueprint, and so on).
+- **Mix** gives every scene a different theme.
+- **Animated** (checkbox) adds drifting backgrounds, title and bullets sliding in one by one in step with the scene, a progress bar, and a colour wipe between scenes. Untick it for themed still slides, which render several times faster and use less memory.
+
+Command line: `--theme neon` or `--theme mix`, and `--static` for no animation. In `.env`: `VIDEO_THEME` and `VIDEO_ANIMATED`.
+
+Rough cost: a 24 second animated video takes about 25 seconds to render at 1080p (about 13 seconds at 720p) on a modest single-core machine, versus about 8 seconds for still slides.
 
 ## AI providers and keys
 
@@ -133,7 +157,9 @@ Without Piper, videos are silent and each scene's length is estimated from the n
 ## Command line
 
 ```bash
-python make_video.py --demo                        # built-in sample, no Groq needed
+python make_video.py --demo                        # built-in sample, no AI key needed
+python make_video.py --demo --theme terminal       # pick a theme
+python make_video.py --demo --static               # themed still slides, fastest
 python make_video.py "How does DNS work?"          # AI writes the script (provider from .env)
 python make_video.py "How does DNS work?" --provider anthropic --model claude-haiku-5-5
 python make_video.py --script examples/my_script.txt
@@ -150,6 +176,7 @@ app.py              Flask backend (jobs, library, video serving)
 render.yaml         Render deployment blueprint
 make_video.py       Script generation, slide drawing, and video rendering (ffmpeg)
 llm.py              Provider-neutral AI client (Groq, OpenAI, Anthropic, custom)
+themes.py           Visual themes, artwork, and the animation filter graph
 templates/
   index.html        Web UI
 examples/
