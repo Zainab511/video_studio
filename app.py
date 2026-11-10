@@ -24,6 +24,7 @@ from flask import Flask, Response, abort, jsonify, request, send_from_directory
 
 import llm
 import make_video as mv  # also loads .env
+import themes
 
 BASE = Path(__file__).resolve().parent
 VIDEOS = BASE / "videos"
@@ -41,6 +42,7 @@ if os.getenv("RENDER") and not APP_PASSWORD:  # RENDER is set automatically on R
     raise RuntimeError("Set APP_PASSWORD in the Environment settings: the app has no other login, "
                        "and a public URL would let anyone use your Groq key and server.")
 ID_RE = re.compile(r"^[0-9a-f]{12}$")
+THEME_CHOICES = ["auto", "mix", *themes.THEME_IDS]
 
 app = Flask(__name__)
 executor = ThreadPoolExecutor(max_workers=1)  # one render at a time keeps your CPU usable
@@ -118,7 +120,8 @@ def set_job(job_id: str, **fields) -> None:
 
 # ---------- background build ----------
 
-def run_job(job_id: str, script_text: str, title: str, use_voice: bool, cfg: "llm.LLMConfig | None") -> None:
+def run_job(job_id: str, script_text: str, title: str, use_voice: bool, cfg: "llm.LLMConfig | None",
+            theme: str, animated: bool) -> None:
     folder = VIDEOS / job_id
     try:
         set_job(job_id, status="running", message="Reading script...")
@@ -144,6 +147,8 @@ def run_job(job_id: str, script_text: str, title: str, use_voice: bool, cfg: "ll
             folder / "video.mp4",
             on_progress=on_progress,
             quiet=True,
+            theme=theme,
+            animated=animated,
         )
         shutil.rmtree(folder / "work", ignore_errors=True)
 
@@ -154,6 +159,8 @@ def run_job(job_id: str, script_text: str, title: str, use_voice: bool, cfg: "ll
             "duration": round(duration, 1),
             "scenes": len(scenes),
             "voice": bool(use_voice and voice_available()),
+            "theme": theme,
+            "animated": animated,
             "script": mv.scenes_to_text(scenes),
         }
         (folder / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
@@ -187,7 +194,19 @@ def config():
             "needs_base_url": pid == "custom" and ALLOW_CUSTOM_BASE_URL,
             "available": pid != "custom" or ALLOW_CUSTOM_BASE_URL or bool(llm.env_base_url("custom")),
         })
-    return jsonify(providers=providers, default_provider=llm.default_provider(), voice=voice_available())
+    theme_list = [{"id": t.id, "name": t.name} for t in themes.THEME_LIST]
+    return jsonify(providers=providers, default_provider=llm.default_provider(), voice=voice_available(),
+                   themes=theme_list, default_theme=mv.VIDEO_THEME if mv.VIDEO_THEME in THEME_CHOICES else "auto",
+                   animated_default=mv.VIDEO_ANIMATED)
+
+
+@app.get("/themes/<theme_id>.png")
+def theme_preview(theme_id):
+    try:
+        png = themes.preview_png(theme_id)
+    except KeyError:
+        abort(404)
+    return Response(png, mimetype="image/png", headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.post("/api/models")
@@ -239,7 +258,11 @@ def build():
         cfg = resolve_llm(data)  # optional: only used to write slide titles/bullets
     except ValueError:
         cfg = None
-    executor.submit(run_job, job_id, script, (data.get("title") or "").strip()[:100], bool(data.get("voice")), cfg)
+    theme = data.get("theme") if data.get("theme") in THEME_CHOICES else (
+        mv.VIDEO_THEME if mv.VIDEO_THEME in THEME_CHOICES else "auto")
+    animated = bool(data["animated"]) if "animated" in data else mv.VIDEO_ANIMATED
+    executor.submit(run_job, job_id, script, (data.get("title") or "").strip()[:100], bool(data.get("voice")), cfg,
+                    theme, animated)
     return jsonify(job=job_id), 202
 
 
