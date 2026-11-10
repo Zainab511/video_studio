@@ -9,6 +9,7 @@ Reads GROQ_API_KEY, GROQ_MODEL and (optional) PIPER_VOICE from your .env file.
 Videos are saved in ./videos/<id>/video.mp4 with a meta.json next to each one.
 """
 
+import hmac
 import json
 import os
 import re
@@ -19,8 +20,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from flask import Flask, abort, jsonify, request, send_from_directory
+from flask import Flask, Response, abort, jsonify, request, send_from_directory
 
+import llm
 import make_video as mv  # also loads .env
 
 BASE = Path(__file__).resolve().parent
@@ -29,7 +31,15 @@ VIDEOS.mkdir(exist_ok=True)
 
 PIPER_VOICE = os.getenv("PIPER_VOICE") or None
 MAX_SCRIPT_CHARS = 20_000
-MAX_SCENES = 30
+MAX_SCENES = int(os.getenv("MAX_SCENES", "30"))
+MAX_VIDEOS = int(os.getenv("MAX_VIDEOS", "0"))  # keep only the newest N videos (0 = keep all)
+APP_PASSWORD = os.getenv("APP_PASSWORD") or None
+# Letting visitors type any base URL makes the server call it, so it is off by default on Render.
+ALLOW_CUSTOM_BASE_URL = os.getenv("ALLOW_CUSTOM_BASE_URL", "0" if os.getenv("RENDER") else "1") == "1"
+
+if os.getenv("RENDER") and not APP_PASSWORD:  # RENDER is set automatically on Render
+    raise RuntimeError("Set APP_PASSWORD in the Environment settings: the app has no other login, "
+                       "and a public URL would let anyone use your Groq key and server.")
 ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 app = Flask(__name__)
@@ -38,14 +48,51 @@ jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
 
 
+# ---------- password protection (set APP_PASSWORD to enable) ----------
+
+@app.before_request
+def require_password():
+    if not APP_PASSWORD or request.path == "/healthz":
+        return None
+    auth = request.authorization  # browser shows a login box; username can be anything
+    if auth and hmac.compare_digest((auth.password or "").encode(), APP_PASSWORD.encode()):
+        return None
+    return Response("Login required", 401, {"WWW-Authenticate": 'Basic realm="Video Studio"'})
+
+
+@app.get("/healthz")
+def healthz():
+    return "ok"
+
+
 # ---------- helpers ----------
+
+def prune_videos() -> None:
+    """Delete the oldest videos beyond MAX_VIDEOS (the disk is small and temporary on free hosts)."""
+    if MAX_VIDEOS <= 0:
+        return
+    found = []
+    for folder in VIDEOS.iterdir():
+        meta = read_meta(folder) if folder.is_dir() else None
+        if meta:
+            found.append((meta["created"], folder))
+    found.sort(reverse=True)
+    for _, folder in found[MAX_VIDEOS:]:
+        shutil.rmtree(folder, ignore_errors=True)
+
 
 def voice_available() -> bool:
     return bool(PIPER_VOICE and Path(PIPER_VOICE).exists() and shutil.which("piper"))
 
 
-def groq_available() -> bool:
-    return bool(os.getenv("GROQ_API_KEY"))
+def resolve_llm(data: dict, need_model: bool = True) -> "llm.LLMConfig":
+    """Build an LLM config from the request ('llm' object) with .env fallbacks. Raises ValueError."""
+    spec = data.get("llm") or {}
+    return llm.build_config(
+        spec.get("provider") or llm.default_provider(),
+        model=spec.get("model"), api_key=spec.get("api_key"), base_url=spec.get("base_url"),
+        allow_custom_base=ALLOW_CUSTOM_BASE_URL, need_model=need_model,
+    )
 
 
 def valid_id(video_id: str) -> Path:
@@ -71,7 +118,7 @@ def set_job(job_id: str, **fields) -> None:
 
 # ---------- background build ----------
 
-def run_job(job_id: str, script_text: str, title: str, use_voice: bool) -> None:
+def run_job(job_id: str, script_text: str, title: str, use_voice: bool, cfg: "llm.LLMConfig | None") -> None:
     folder = VIDEOS / job_id
     try:
         set_job(job_id, status="running", message="Reading script...")
@@ -85,7 +132,7 @@ def run_job(job_id: str, script_text: str, title: str, use_voice: bool) -> None:
 
         if any(not sc["title"] or not sc["bullets"] for sc in scenes):
             set_job(job_id, message="Writing slide titles and bullets...")
-            mv.fill_missing_slides(scenes, groq_available())
+            mv.fill_missing_slides(scenes, cfg)
 
         def on_progress(frac: float, msg: str) -> None:
             set_job(job_id, progress=round(frac, 3), message=msg)
@@ -110,6 +157,7 @@ def run_job(job_id: str, script_text: str, title: str, use_voice: bool) -> None:
             "script": mv.scenes_to_text(scenes),
         }
         (folder / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        prune_videos()
         set_job(job_id, status="done", progress=1.0, message="Done", meta=meta)
     except Exception as e:  # report any failure to the UI
         shutil.rmtree(folder, ignore_errors=True)
@@ -129,13 +177,33 @@ def index():
 
 @app.get("/api/config")
 def config():
-    return jsonify(groq=groq_available(), voice=voice_available(), model=mv.GROQ_MODEL)
+    providers = []
+    for pid, spec in llm.PROVIDERS.items():
+        providers.append({
+            "id": pid, "label": spec["label"],
+            "server_key": bool(llm.server_key(pid)),
+            "key_optional": bool(spec.get("key_optional")),
+            "default_model": llm.default_model(pid),
+            "needs_base_url": pid == "custom" and ALLOW_CUSTOM_BASE_URL,
+            "available": pid != "custom" or ALLOW_CUSTOM_BASE_URL or bool(llm.env_base_url("custom")),
+        })
+    return jsonify(providers=providers, default_provider=llm.default_provider(), voice=voice_available())
+
+
+@app.post("/api/models")
+def models():
+    data = request.get_json(silent=True) or {}
+    try:
+        cfg = resolve_llm(data, need_model=False)
+        return jsonify(models=llm.list_models(cfg))
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    except llm.LLMError as e:
+        return jsonify(error=str(e)), 502
 
 
 @app.post("/api/generate-script")
 def generate_script():
-    if not groq_available():
-        return jsonify(error="GROQ_API_KEY is not set. Add it to your .env file and restart."), 400
     data = request.get_json(silent=True) or {}
     topic = (data.get("topic") or "").strip()
     if not topic:
@@ -145,10 +213,13 @@ def generate_script():
     except (TypeError, ValueError):
         count = 5
     try:
-        scenes = mv.generate_scenes(topic[:300], count)
+        cfg = resolve_llm(data)
+        scenes = mv.generate_scenes(topic[:300], count, cfg)
         return jsonify(script=mv.scenes_to_text(scenes), title=topic[:80])
-    except Exception as e:
-        return jsonify(error=f"Groq request failed: {e}"), 502
+    except ValueError as e:
+        return jsonify(error=str(e)), 400
+    except llm.LLMError as e:
+        return jsonify(error=str(e)), 502
 
 
 @app.post("/api/build")
@@ -164,7 +235,11 @@ def build():
     (VIDEOS / job_id).mkdir(parents=True)
     with jobs_lock:
         jobs[job_id] = {"id": job_id, "status": "queued", "progress": 0.0, "message": "Queued...", "error": None}
-    executor.submit(run_job, job_id, script, (data.get("title") or "").strip()[:100], bool(data.get("voice")))
+    try:
+        cfg = resolve_llm(data)  # optional: only used to write slide titles/bullets
+    except ValueError:
+        cfg = None
+    executor.submit(run_job, job_id, script, (data.get("title") or "").strip()[:100], bool(data.get("voice")), cfg)
     return jsonify(job=job_id), 202
 
 
@@ -217,6 +292,7 @@ def delete_video(video_id):
 
 if __name__ == "__main__":
     print("Video Studio running at http://127.0.0.1:5000")
-    print(f"  Groq: {'ready, model ' + mv.GROQ_MODEL if groq_available() else 'no GROQ_API_KEY (custom scripts still work)'}")
+    ready = [spec["label"] for pid, spec in llm.PROVIDERS.items() if llm.server_key(pid)]
+    print(f"  AI providers with a key in .env: {', '.join(ready) if ready else 'none (users can paste a key in the UI)'}")
     print(f"  Voiceover: {'Piper ready' if voice_available() else 'off (set PIPER_VOICE in .env to enable)'}")
     app.run(host="127.0.0.1", port=5000, threaded=True)

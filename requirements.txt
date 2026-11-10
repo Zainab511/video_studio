@@ -1,7 +1,8 @@
 flask
-groq
-moviepy
+gunicorn
+requests
+imageio-ffmpeg
 pillow
 python-dotenv
-# optional, for free local voiceover:
-# piper-tts
+# optional, for free local voiceover (not practical on free hosting):
+piper-tts

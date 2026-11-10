@@ -63,6 +63,7 @@
   .check input { width: auto; }
   .progress { height: 9px; border-radius: 6px; background: var(--line); overflow: hidden; margin-top: 14px; display: none; }
   .progress > div { height: 100%; width: 0; background: var(--accent); transition: width .4s ease; }
+  .hint.error { color: var(--danger); }
   .status { font-size: 13.5px; margin-top: 8px; min-height: 20px; color: var(--muted); }
   .status.error { color: var(--danger); }
   .status.ok { color: var(--ok); }
@@ -96,7 +97,27 @@
     <div class="card">
       <h2>1. Script</h2>
 
-      <label for="topic">Generate a script with Groq from a topic (optional)</label>
+      <label for="provider">AI provider and API key</label>
+      <div class="row">
+        <div style="width:230px"><select id="provider"></select></div>
+        <div class="grow"><input id="apikey" type="password" autocomplete="off" spellcheck="false" placeholder="API key"></div>
+      </div>
+      <div id="baseRow" style="display:none">
+        <label for="baseurl">Base URL (OpenAI-compatible)</label>
+        <input id="baseurl" type="text" spellcheck="false" placeholder="https://openrouter.ai/api/v1  or  http://localhost:11434/v1">
+      </div>
+
+      <label for="modelSelect">Model</label>
+      <div class="row">
+        <div class="grow"><select id="modelSelect"></select></div>
+        <button id="refreshModels" type="button">Refresh</button>
+      </div>
+      <input id="modelCustom" type="text" spellcheck="false" placeholder="Exact model id" style="display:none;margin-top:8px">
+      <label class="check"><input type="checkbox" id="remember"> <span>Remember my keys in this browser</span></label>
+      <div class="hint" id="llmHint"></div>
+      <div class="hint">Your key is sent to this app&rsquo;s server only to call the provider, and the server does not store it. A Claude.ai or ChatGPT subscription is not an API key: create one in the provider&rsquo;s developer console.</div>
+
+      <label for="topic">Topic (optional: let the AI draft the script)</label>
       <div class="row">
         <div class="grow"><input id="topic" type="text" placeholder="e.g. How does DNS work?"></div>
         <div style="width:92px">
@@ -106,7 +127,6 @@
         </div>
         <button id="genBtn">Generate</button>
       </div>
-      <div class="hint" id="genHint"></div>
 
       <label for="script">Script (edit freely)</label>
       <textarea id="script" spellcheck="true" placeholder="# Scene title&#10;- bullet one&#10;- bullet two&#10;Narration for this scene, written the way you would say it out loud.&#10;&#10;# Next scene&#10;- another bullet&#10;More narration..."></textarea>
@@ -180,16 +200,109 @@ async function api(url, options) {
   return data;
 }
 
+const CUSTOM = "__custom__";
+const PREF_KEY = "vs_prefs", KEYS_KEY = "vs_keys";
+let CONFIG = null;
+let prefs = { provider: null, models: {}, base_url: "", remember: false };
+let keys = {};            // provider id -> API key (kept in memory; saved to this browser only if "Remember" is ticked)
+let refreshTimer = null, refreshSeq = 0;
+
+function loadPrefs() {
+  try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || "{}")); } catch (e) { /* ignore */ }
+  if (prefs.remember) { try { keys = JSON.parse(localStorage.getItem(KEYS_KEY) || "{}") || {}; } catch (e) { keys = {}; } }
+}
+function savePrefs() {
+  try {
+    localStorage.setItem(PREF_KEY, JSON.stringify(prefs));
+    if (prefs.remember) localStorage.setItem(KEYS_KEY, JSON.stringify(keys)); else localStorage.removeItem(KEYS_KEY);
+  } catch (e) { /* storage unavailable */ }
+}
+function setHint(text, isError) { const el = $("llmHint"); el.textContent = text || ""; el.className = "hint" + (isError ? " error" : ""); }
+function currentProvider() { return CONFIG.providers.find((p) => p.id === $("provider").value); }
+function getModel() { const v = $("modelSelect").value; return v === CUSTOM ? $("modelCustom").value.trim() : v; }
+function llmPayload() {
+  const p = currentProvider();
+  return { provider: p.id, api_key: (keys[p.id] || "").trim(), model: getModel(), base_url: $("baseurl").value.trim() };
+}
+function toggleCustom() { $("modelCustom").style.display = $("modelSelect").value === CUSTOM ? "block" : "none"; }
+
+function setModelOptions(ids, wanted) {
+  const sel = $("modelSelect"); sel.textContent = "";
+  const add = (value, label) => { const o = document.createElement("option"); o.value = value; o.textContent = label; sel.append(o); };
+  add("", "Choose a model...");
+  const list = ids.slice();
+  if (wanted && !list.includes(wanted)) list.unshift(wanted);
+  list.forEach((id) => add(id, id));
+  add(CUSTOM, "Type a model id...");
+  sel.value = wanted || "";
+  toggleCustom();
+}
+
+function showProviderUI() {
+  const p = currentProvider();
+  $("apikey").value = keys[p.id] || "";
+  $("apikey").placeholder = p.server_key ? "Optional: the server already has a key" : (p.key_optional ? "API key (optional)" : "Paste your API key");
+  $("baseRow").style.display = p.needs_base_url ? "block" : "none";
+  setModelOptions([], prefs.models[p.id] || p.default_model || "");
+}
+
+function canListModels() {
+  const p = currentProvider();
+  if (p.needs_base_url && !$("baseurl").value.trim()) return false;
+  return !!(keys[p.id] || p.server_key || p.key_optional);
+}
+
+async function refreshModels() {
+  const seq = ++refreshSeq;
+  const p = currentProvider();
+  const keep = getModel() || prefs.models[p.id] || p.default_model || "";
+  if (!canListModels()) {
+    setModelOptions([], keep);
+    setHint(p.needs_base_url && !$("baseurl").value.trim()
+      ? "Enter the base URL to load models."
+      : "Paste an API key to load the model list, or choose \"Type a model id...\".");
+    return;
+  }
+  setHint("Loading models..."); $("refreshModels").disabled = true;
+  try {
+    const data = await api("/api/models", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ llm: llmPayload() }),
+    });
+    if (seq !== refreshSeq) return;
+    setModelOptions(data.models, keep);
+    setHint(data.models.length + " models available.");
+  } catch (e) {
+    if (seq === refreshSeq) { setModelOptions([], keep); setHint(e.message, true); }
+  }
+  if (seq === refreshSeq) $("refreshModels").disabled = false;
+}
+function scheduleRefresh() { clearTimeout(refreshTimer); refreshTimer = setTimeout(refreshModels, 700); }
+
+$("provider").addEventListener("change", () => { prefs.provider = $("provider").value; savePrefs(); showProviderUI(); refreshModels(); });
+$("apikey").addEventListener("input", () => { keys[currentProvider().id] = $("apikey").value; savePrefs(); scheduleRefresh(); });
+$("baseurl").addEventListener("input", () => { prefs.base_url = $("baseurl").value; savePrefs(); scheduleRefresh(); });
+$("modelSelect").addEventListener("change", () => { toggleCustom(); prefs.models[currentProvider().id] = getModel(); savePrefs(); });
+$("modelCustom").addEventListener("input", () => { prefs.models[currentProvider().id] = getModel(); savePrefs(); });
+$("remember").addEventListener("change", () => { prefs.remember = $("remember").checked; savePrefs(); });
+$("refreshModels").addEventListener("click", refreshModels);
+
 async function loadConfig() {
   try {
-    const cfg = await api("/api/config");
-    if (!cfg.groq) {
-      $("genBtn").disabled = true; $("topic").disabled = true;
-      $("genHint").textContent = "Script generation is off: add GROQ_API_KEY to your .env file and restart. You can still paste your own script.";
-    } else {
-      $("genHint").textContent = "Using model " + cfg.model + ".";
+    CONFIG = await api("/api/config");
+    loadPrefs();
+    const sel = $("provider");
+    for (const p of CONFIG.providers.filter((x) => x.available)) {
+      const o = document.createElement("option");
+      o.value = p.id; o.textContent = p.label + (p.server_key ? " (key on server)" : "");
+      sel.append(o);
     }
-    if (!cfg.voice) {
+    const ids = Array.from(sel.options).map((o) => o.value);
+    sel.value = ids.includes(prefs.provider) ? prefs.provider : (ids.includes(CONFIG.default_provider) ? CONFIG.default_provider : ids[0]);
+    $("baseurl").value = prefs.base_url || "";
+    $("remember").checked = !!prefs.remember;
+    showProviderUI();
+    refreshModels();
+    if (!CONFIG.voice) {
       $("voice").disabled = true;
       $("voiceLabel").textContent = "Add voiceover (needs Piper: set PIPER_VOICE in .env)";
     } else {
@@ -201,11 +314,11 @@ async function loadConfig() {
 $("genBtn").addEventListener("click", async () => {
   const topic = $("topic").value.trim();
   if (!topic) { setStatus("Enter a topic first.", "error"); return; }
-  $("genBtn").disabled = true; setStatus("Asking Groq for a script...");
+  $("genBtn").disabled = true; setStatus("Asking the AI for a script...");
   try {
     const data = await api("/api/generate-script", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic, scenes: Number($("scenes").value) }),
+      body: JSON.stringify({ topic, scenes: Number($("scenes").value), llm: llmPayload() }),
     });
     $("script").value = data.script;
     if (!$("title").value) $("title").value = data.title;
@@ -226,7 +339,7 @@ $("buildBtn").addEventListener("click", async () => {
   try {
     const { job } = await api("/api/build", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ script, title: $("title").value.trim(), voice: $("voice").checked }),
+      body: JSON.stringify({ script, title: $("title").value.trim(), voice: $("voice").checked, llm: llmPayload() }),
     });
     await pollJob(job);
   } catch (e) {
