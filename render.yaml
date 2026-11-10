@@ -7,17 +7,31 @@ services:
     buildCommand: pip install -r requirements.txt
     # One worker on purpose: build jobs are tracked in memory.
     startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT
-    # healthCheckPath: /healthz
+    healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.8
-      - key: GROQ_API_KEY
-        sync: false          # you enter this in the dashboard
-      - key: GROQ_MODEL
-        value: qwen/qwen3.8-27b
+
+      # ---- Access control (required: the app refuses to start on Render without it) ----
       - key: APP_PASSWORD
         sync: false          # you enter this in the dashboard
-      # Lighter settings for the free instance (0.1 CPU):
+
+      # ---- AI provider defaults ----
+      # Visitors can also paste their own key and pick any provider/model in the page.
+      - key: LLM_PROVIDER    # groq | openai | anthropic | custom
+        value: groq
+      - key: GROQ_API_KEY
+        sync: false          # you enter this in the dashboard (leave blank if visitors bring their own)
+      - key: GROQ_MODEL
+        value: qwen/qwen3.8-27b   # check console.groq.com/docs/models if this errors
+      # To also offer other providers with a server-side key, add these later in
+      # Dashboard > Environment (not listed here so the Blueprint does not prompt for them):
+      #   OPENAI_API_KEY, OPENAI_MODEL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL,
+      #   OPENAI_COMPAT_BASE_URL, OPENAI_COMPAT_API_KEY, OPENAI_COMPAT_MODEL
+      - key: ALLOW_CUSTOM_BASE_URL
+        value: "0"           # keep 0 so visitors cannot make your server call arbitrary URLs
+
+      # ---- Lighter rendering for the free instance (0.1 CPU) ----
       - key: VIDEO_HEIGHT
         value: "720"
       - key: VIDEO_FPS

@@ -3,19 +3,20 @@
 Topic -> explainer video, using Groq (free tier) for the script and local tools for the rest.
 
 Pipeline:
-  1. Groq LLM writes a scene-by-scene script as JSON
+  1. An LLM (Groq, OpenAI, Anthropic or any OpenAI-compatible API) writes a scene-by-scene script as JSON
   2. Piper (optional, local TTS) turns narration into audio. Without Piper, video is silent
      and each scene's length is estimated from the word count.
   3. Pillow draws a slide image per scene
-  4. MoviePy joins slides + audio into an MP4
+  4. ffmpeg turns the slides + audio into an MP4
 
 Setup:
-  pip install groq moviepy pillow python-dotenv
-  export GROQ_API_KEY="your_key"          # free key from console.groq.com
+  pip install requests imageio-ffmpeg pillow python-dotenv
+  export GROQ_API_KEY="your_key"          # or OPENAI_API_KEY / ANTHROPIC_API_KEY, see .env.example
   (optional) pip install piper-tts  and download a voice, e.g. en_US-lessac-medium.onnx
 
 Usage:
   python make_video.py "How does DNS work?"
+  python make_video.py "How does DNS work?" --provider anthropic --model claude-haiku-5-5
   python make_video.py "How does DNS work?" --voice ./en_US-lessac-medium.onnx
   python make_video.py --script my_script.txt      # your own script (see parse_script for formats)
   python make_video.py --script build/scenes.json  # re-render after editing a saved script
@@ -35,15 +36,19 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+import llm
+
 try:
     from dotenv import load_dotenv
     load_dotenv()  # reads GROQ_API_KEY / GROQ_MODEL from a .env file next to where you run the script
 except ImportError:
     pass  # fine if you export the variables in your shell instead
 
-W, H = 1920, 1080
-FPS = 24
-GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")  # verify the name at console.groq.com/docs/models
+W, H = 1920, 1080                                    # slides are always drawn at 1080p
+FPS = int(os.getenv("VIDEO_FPS", "15"))               # slides are still images, so low fps is fine; lower = faster
+OUT_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "1080"))   # output height, e.g. 720 or 480 on weak servers
+VIDEO_PRESET = os.getenv("VIDEO_PRESET", "veryfast")  # x264 speed preset: ultrafast (fastest) ... medium (smallest files)
+VIDEO_THREADS = int(os.getenv("VIDEO_THREADS", "2"))
 
 PALETTES = [
     ((15, 23, 42), (56, 189, 248)),    # navy / sky
@@ -65,29 +70,9 @@ DEMO_SCENES = [
 ]
 
 
-# ---------- 1. Script generation (Groq) ----------
+# ---------- 1. Script generation (any LLM provider) ----------
 
-def groq_json(system: str, user: str) -> dict:
-    """Call Groq and return the parsed JSON object from the reply."""
-    from groq import Groq
-
-    client = Groq()  # reads GROQ_API_KEY from the environment
-    resp = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        response_format={"type": "json_object"},
-        temperature=0.7,
-    )
-    raw = resp.choices[0].message.content or ""
-    # Reasoning models (e.g. Qwen) may prepend <think>...</think>; strip it and grab the JSON object
-    raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-    match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-    if not match:
-        raise RuntimeError("Model did not return JSON. Raw response:\n" + raw)
-    return json.loads(match.group(0))
-
-
-def generate_scenes(topic: str, num_scenes: int) -> list[dict]:
+def generate_scenes(topic: str, num_scenes: int, cfg: "llm.LLMConfig") -> list[dict]:
     system = (
         "You write scripts for short YouTube tech explainer videos. "
         "Reply with JSON only, in this exact shape: "
@@ -96,9 +81,9 @@ def generate_scenes(topic: str, num_scenes: int) -> list[dict]:
         "Narration: 2-3 plain sentences, written to be spoken aloud, no markdown."
     )
     user = f"Topic: {topic}\nNumber of scenes: {num_scenes}\nAudience: curious beginners."
-    scenes = groq_json(system, user).get("scenes", [])
+    scenes = llm.chat_json(cfg, system, user).get("scenes", [])
     if not scenes:
-        raise RuntimeError("Groq returned no scenes.")
+        raise llm.LLMError("The model returned no scenes. Try again or pick another model.")
     return scenes
 
 
@@ -174,12 +159,12 @@ def heuristic_slide(scene: dict, i: int) -> None:
         scene["bullets"] = [_short(x, 10) for x in sentences[1:4]]
 
 
-def fill_missing_slides(scenes: list[dict], use_groq: bool) -> None:
-    """Fill in missing titles/bullets, using Groq when possible."""
+def fill_missing_slides(scenes: list[dict], cfg: "llm.LLMConfig | None") -> None:
+    """Fill in missing titles/bullets, using the chosen LLM when one is configured."""
     todo = [i for i, sc in enumerate(scenes) if not sc["title"] or not sc["bullets"]]
     if not todo:
         return
-    if use_groq:
+    if cfg is not None:
         try:
             system = (
                 "You create slide text for a tech explainer video. You get numbered narration "
@@ -188,13 +173,13 @@ def fill_missing_slides(scenes: list[dict], use_groq: bool) -> None:
                 "each max 10 words, summarizing the passage."
             )
             user = "\n\n".join(f"{n + 1}. {scenes[i]['narration']}" for n, i in enumerate(todo))
-            slides = groq_json(system, user).get("slides", [])
+            slides = llm.chat_json(cfg, system, user).get("slides", [])
             if len(slides) == len(todo):
                 for i, sl in zip(todo, slides):
                     scenes[i]["title"] = scenes[i]["title"] or sl.get("title", "")
                     scenes[i]["bullets"] = scenes[i]["bullets"] or sl.get("bullets", [])
         except Exception as e:  # fall back to offline heuristic
-            print(f"  ! Groq slide generation failed ({e}); using simple fallback", file=sys.stderr)
+            print(f"  ! AI slide generation failed ({e}); using simple fallback", file=sys.stderr)
     for i in todo:
         heuristic_slide(scenes[i], i)
 
@@ -271,71 +256,119 @@ def draw_slide(scene: dict, index: int, total: int, out_png: Path) -> None:
     d.rectangle([100, H - 30, 100 + bar_w, H - 22], fill=(51, 65, 85))
     d.rectangle([100, H - 30, 100 + int(bar_w * (index + 1) / total), H - 22], fill=accent)
 
+    if OUT_HEIGHT != H:  # downscale for faster rendering (x264 needs even dimensions)
+        out_w = round(OUT_HEIGHT * W / H) // 2 * 2
+        img = img.resize((out_w, OUT_HEIGHT // 2 * 2), Image.LANCZOS)
     img.save(out_png)
 
 
-# ---------- 4. Assemble (MoviePy 2.x) ----------
+# ---------- 4. Assemble (ffmpeg) ----------
+
+def ffmpeg_exe() -> str:
+    """Use the ffmpeg bundled with imageio-ffmpeg, else one on PATH."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        exe = shutil.which("ffmpeg")
+        if exe:
+            return exe
+        raise RuntimeError("ffmpeg not found. Run: pip install imageio-ffmpeg")
+
+
+def run_ffmpeg(args: list[str], cwd: Path | None = None) -> None:
+    r = subprocess.run([ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error", *args],
+                       capture_output=True, text=True, cwd=cwd)
+    if r.returncode != 0:
+        raise RuntimeError("ffmpeg failed: " + r.stderr[-600:])
+
 
 def build_video(scenes, voice_model, workdir: Path, out_mp4: Path, on_progress=None, quiet=False) -> float:
-    """Render scenes to out_mp4. on_progress(fraction 0-1, message) is optional. Returns duration in seconds."""
-    from moviepy import AudioFileClip, ImageClip, concatenate_videoclips, vfx
+    """
+    Render scenes to out_mp4. on_progress(fraction 0-1, message) is optional. Returns duration in seconds.
 
+    Each slide is a still image, so we hand it straight to ffmpeg (one short clip per scene, with
+    fades), then join the clips without re-encoding. This is far faster than building every frame
+    in Python.
+    """
     def report(frac: float, msg: str) -> None:
         if on_progress:
             on_progress(frac, msg)
 
     workdir.mkdir(parents=True, exist_ok=True)
-    clips = []
+    n = len(scenes)
+
+    # Phase 1: slide images + voiceover audio
+    prepared = []  # (png, wav or None, duration)
     for i, scene in enumerate(scenes):
-        msg = f"Preparing scene {i + 1}/{len(scenes)}: {scene.get('title')}"
+        msg = f"Preparing scene {i + 1}/{n}: {scene.get('title')}"
         print(msg)
-        report(0.3 * i / len(scenes), msg)
+        report(0.15 * i / n, msg)
         png = workdir / f"slide_{i:02d}.png"
         wav = workdir / f"voice_{i:02d}.wav"
-
-        draw_slide(scene, i, len(scenes), png)
+        draw_slide(scene, i, n, png)
         narration = scene.get("narration", "")
         audio_len = synthesize(narration, wav, voice_model)
         duration = (audio_len + 0.6) if audio_len else estimate_duration(narration)
+        prepared.append((png, wav if audio_len else None, duration))
 
-        clip = ImageClip(str(png)).with_duration(duration)
-        if audio_len:
-            clip = clip.with_audio(AudioFileClip(str(wav)))
-        clip = clip.with_effects([vfx.FadeIn(0.4), vfx.FadeOut(0.4)])
-        clips.append(clip)
+    has_audio = any(w for _, w, _ in prepared)
 
-    final = concatenate_videoclips(clips, method="compose")
-    report(0.3, "Rendering video...")
+    # Phase 2: one clip per scene
+    segments = []
+    for i, (png, wav, dur) in enumerate(prepared):
+        report(0.15 + 0.8 * i / n, f"Rendering scene {i + 1}/{n}...")
+        seg = workdir / f"seg_{i:02d}.mp4"
+        fade = min(0.4, dur / 4)
+        args = ["-loop", "1", "-framerate", str(FPS), "-i", str(png)]
+        if wav:
+            args += ["-i", str(wav)]
+        elif has_audio:  # keep every clip's streams identical so they can be joined
+            args += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+        vf = f"fade=t=in:st=0:d={fade:.2f},fade=t=out:st={dur - fade:.3f}:d={fade:.2f},format=yuv420p"
+        args += ["-vf", vf, "-t", f"{dur:.3f}", "-r", str(FPS),
+                 "-c:v", "libx264", "-preset", VIDEO_PRESET, "-tune", "stillimage",
+                 "-threads", str(VIDEO_THREADS)]
+        if has_audio:
+            args += ["-af", "apad", "-c:a", "aac", "-ar", "44100", "-ac", "2"]
+        else:
+            args += ["-an"]
+        run_ffmpeg(args + [str(seg)])
+        segments.append(seg)
 
-    logger = "bar"
-    if quiet or on_progress:
-        from proglog import ProgressBarLogger
+    # Phase 3: join the clips (no re-encoding)
+    report(0.95, "Joining scenes...")
+    listing = workdir / "list.txt"
+    listing.write_text("".join(f"file '{seg.name}'\n" for seg in segments), encoding="utf-8")
+    run_ffmpeg(["-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy",
+                "-movflags", "+faststart", str(Path(out_mp4).resolve())], cwd=workdir)
 
-        class _Prog(ProgressBarLogger):
-            def bars_callback(self, bar, attr, value, old_value=None):
-                if bar == "frame_index" and attr == "index":
-                    total = self.bars[bar].get("total") or 1
-                    report(0.3 + 0.7 * min(value / total, 1.0), "Rendering video...")
-
-        logger = _Prog() if on_progress else None
-
-    final.write_videofile(str(out_mp4), fps=FPS, codec="libx264", audio_codec="aac", logger=logger)
-    duration = float(final.duration)
+    report(1.0, "Done")
     print(f"\nDone: {out_mp4}")
-    return duration
+    return float(sum(d for _, _, d in prepared))
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Topic -> explainer video using Groq + MoviePy")
+    ap = argparse.ArgumentParser(description="Topic -> explainer video using an AI model + ffmpeg")
     ap.add_argument("topic", nargs="?", help="Video topic, e.g. 'How does DNS work?'")
     ap.add_argument("--script", help="Use your own script file (.txt, .md or .json) instead of Groq writing it")
-    ap.add_argument("--no-groq-slides", action="store_true",
-                    help="With --script: don't use Groq to make titles/bullets, use a simple offline fallback")
+    ap.add_argument("--no-ai-slides", "--no-groq-slides", dest="no_ai_slides", action="store_true",
+                    help="With --script: don't use an AI model for titles/bullets, use a simple offline fallback")
+    ap.add_argument("--provider", choices=list(llm.PROVIDERS), help="AI provider (default: LLM_PROVIDER from .env, else groq)")
+    ap.add_argument("--model", help="Model id (default: from .env, e.g. GROQ_MODEL)")
     ap.add_argument("--scenes", type=int, default=5, help="Number of scenes (default 5)")
     ap.add_argument("--voice", help="Path to a Piper .onnx voice model (optional)")
     ap.add_argument("--out", default="output.mp4", help="Output file name")
     ap.add_argument("--demo", action="store_true", help="Skip Groq, use built-in sample scenes")
     args = ap.parse_args()
+
+    def make_cfg(required: bool):
+        try:
+            return llm.build_config(args.provider or llm.default_provider(), model=args.model)
+        except ValueError as e:
+            if required:
+                sys.exit(str(e))
+            return None
 
     if args.demo:
         scenes = DEMO_SCENES
@@ -343,16 +376,14 @@ def main() -> None:
         scenes = parse_script(Path(args.script))
         if not scenes:
             sys.exit("No scenes found in your script file.")
-        use_groq = bool(os.environ.get("GROQ_API_KEY")) and not args.no_groq_slides
-        fill_missing_slides(scenes, use_groq)
+        fill_missing_slides(scenes, None if args.no_ai_slides else make_cfg(False))
         print(f"Loaded {len(scenes)} scenes from {args.script}")
     else:
         if not args.topic:
             ap.error("Provide a topic, --script FILE, or --demo")
-        if not os.environ.get("GROQ_API_KEY"):
-            sys.exit("Set GROQ_API_KEY first (free key at console.groq.com).")
-        print(f"Asking Groq for a script on: {args.topic}")
-        scenes = generate_scenes(args.topic, args.scenes)
+        cfg = make_cfg(True)
+        print(f"Asking {llm.PROVIDERS[cfg.provider]['label']} ({cfg.model}) for a script on: {args.topic}")
+        scenes = generate_scenes(args.topic, args.scenes, cfg)
 
     workdir = Path("build")
     workdir.mkdir(exist_ok=True)
